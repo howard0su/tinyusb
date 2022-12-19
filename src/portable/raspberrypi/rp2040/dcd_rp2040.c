@@ -50,7 +50,7 @@
 #define usb_hw_clear hw_clear_alias(usb_hw)
 
 // Init these in dcd_init
-static uint8_t *next_buffer_ptr;
+static uint8_t buffer_allocation[USB_DPRAM_MAX / 64];
 
 // USB_MAX_ENDPOINTS Endpoints, direction TUSB_DIR_OUT for out and TUSB_DIR_IN for in.
 static struct hw_endpoint hw_endpoints[USB_MAX_ENDPOINTS][2];
@@ -81,12 +81,34 @@ static void _hw_endpoint_alloc(struct hw_endpoint *ep, uint8_t transfer_type)
     size *= 2u;
   }
 
-  ep->hw_data_buf = next_buffer_ptr;
-  next_buffer_ptr += size;
+  int block_num = size / 64;
+  int start_block = -1;
+  // find continues free blocks
+  for (size_t start = 0; start < sizeof(buffer_allocation) - block_num; start++)
+  {
+    size_t end;
+    for (end = start; end < start + block_num; end++)
+    {
+      if (buffer_allocation[end] != 0) // occupied
+        break;
+    }
 
-  assert(((uintptr_t )next_buffer_ptr & 0b111111u) == 0);
+    if (buffer_allocation[end] == 0)
+    {
+      start_block = start;
+      break;
+    } 
+  }
+
+  hard_assert(start_block != -1);
+  buffer_allocation[start_block] = block_num;
+  for(int i = start_block + 1; i < start_block + block_num; i++)
+  {
+    buffer_allocation[i] = 0xff; // not start of a block
+  }
+
+  ep->hw_data_buf = &usb_dpram->epx_data[0] + 64 * (start_block - hw_data_offset(&usb_dpram->epx_data[0]) / 64);
   uint dpram_offset = hw_data_offset(ep->hw_data_buf);
-  hard_assert(hw_data_offset(next_buffer_ptr) <= USB_DPRAM_MAX);
 
   pico_info("  Allocated %d bytes at offset 0x%x (0x%p)\r\n", size, dpram_offset, ep->hw_data_buf);
 
@@ -98,6 +120,9 @@ static void _hw_endpoint_alloc(struct hw_endpoint *ep, uint8_t transfer_type)
 
 static void _hw_endpoint_close(struct hw_endpoint *ep)
 {
+    int start_block = (ep->hw_data_buf - &usb_dpram->epx_data[0]) / 64 + hw_data_offset(&usb_dpram->epx_data[0]) / 64;
+
+    pico_info("  free %d bytes at offset %x (%p)\r\n", buffer_allocation[start_block]* 64, hw_data_offset(ep->hw_data_buf), ep->hw_data_buf);
     // Clear hardware registers and then zero the struct
     // Clears endpoint enable
     *ep->endpoint_control = 0;
@@ -107,18 +132,13 @@ static void _hw_endpoint_close(struct hw_endpoint *ep)
     memset(ep, 0, sizeof(struct hw_endpoint));
 
     // Reclaim buffer space if all endpoints are closed
-    bool reclaim_buffers = true;
-    for ( uint8_t i = 1; i < USB_MAX_ENDPOINTS; i++ )
+    int block_num = buffer_allocation[start_block];
+    hard_assert(block_num != 0xff && block_num != 0);
+
+    for(int i = start_block; i < start_block + block_num; i++)
     {
-        if (hw_endpoint_get_by_num(i, TUSB_DIR_OUT)->hw_data_buf != NULL || hw_endpoint_get_by_num(i, TUSB_DIR_IN)->hw_data_buf != NULL)
-        {
-            reclaim_buffers = false;
-            break;
-        }
-    }
-    if (reclaim_buffers)
-    {
-        next_buffer_ptr = &usb_dpram->epx_data[0];
+      hard_assert(i == start_block || buffer_allocation[i] == 0xff);
+      buffer_allocation[i] = 0;
     }
 }
 
@@ -242,7 +262,11 @@ static void __tusb_irq_path_func(reset_non_control_endpoints)(void)
   tu_memclr(hw_endpoints[1], sizeof(hw_endpoints) - 2*sizeof(hw_endpoint_t));
 
   // reclaim buffer space
-  next_buffer_ptr = &usb_dpram->epx_data[0];
+  memset(buffer_allocation, 0, sizeof(buffer_allocation));
+  for (size_t i = 0; i < hw_data_offset(&usb_dpram->epx_data[0]) / 64; i++)
+  {
+    buffer_allocation[i] = 0xff;
+  }
 }
 
 static void __tusb_irq_path_func(dcd_rp2040_irq)(void)
