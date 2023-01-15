@@ -28,6 +28,7 @@ set(includes_public
 
 set(srcs
     "src/portable/espressif/${tusb_family}/dcd_${tusb_family}.c"
+    "src/class/audio/audio_device.c"
     "src/class/cdc/cdc_device.c"
     "src/class/hid/hid_device.c"
     "src/class/midi/midi_device.c"
